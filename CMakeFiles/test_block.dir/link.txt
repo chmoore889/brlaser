@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wno-missing-braces -Wdate-time -fstack-protector-strong -Wformat -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2  -O2 -g  -rdynamic CMakeFiles/test_block.dir/test/test_block.cc.o -o test_block 

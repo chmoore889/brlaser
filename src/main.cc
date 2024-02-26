@@ -38,7 +38,7 @@ namespace {
 
 cups_raster_t *ras;
 volatile sig_atomic_t interrupted = 0;
-
+cups_file_t* tempFileRasterRead;
 
 void sigterm_handler(int sig) {
   interrupted = 1;
@@ -49,7 +49,11 @@ bool next_line(std::vector<uint8_t> &buf) {
   if (interrupted) {
     return false;
   }
-  return cupsRasterReadPixels(ras, buf.data(), buf.size()) == buf.size();
+
+  ssize_t bytesReadForLine = cupsFileRead(tempFileRasterRead, (char*) buf.data(), buf.size());
+  fprintf(stderr, "DEBUG: " PACKAGE ": read from file is %zd and %zu\n", bytesReadForLine, buf.size());
+
+  return bytesReadForLine == ((ssize_t) buf.size());
 }
 
 
@@ -187,10 +191,95 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "DEBUG: " PACKAGE ": Page header of first page\n");
         dump_page_header(header);
       }
+
+      char tempFileRasterName[1024];
+      cups_file_t* tempFileRasterWrite = cupsTempFile2(tempFileRasterName, sizeof(tempFileRasterName));
+      if(tempFileRasterWrite == NULL) {
+        fprintf(stderr, "ERROR: " PACKAGE ": Temp file write creation failed\n");
+        return 1;
+      }
+      fprintf(stderr, "DEBUG: " PACKAGE ": file name is %s blah\n", tempFileRasterName);
+
+      unsigned char pixelDataBuffer[16384];
+      unsigned pixelBytesRead, totalFileSize = 0;
+      while((pixelBytesRead = cupsRasterReadPixels(ras, pixelDataBuffer, sizeof(pixelDataBuffer)))) {
+        size_t bytesWritten = 0;
+        while(bytesWritten != pixelBytesRead) {
+          bytesWritten += cupsFileWrite(tempFileRasterWrite, (char*) pixelDataBuffer + bytesWritten, pixelBytesRead - bytesWritten);
+        }
+
+        totalFileSize += pixelBytesRead;
+      }
+      fprintf(stderr, "DEBUG: " PACKAGE ": filepos is %ld\n", cupsFileTell(tempFileRasterWrite));
+
+      //Reset file position
+      cupsFileFlush(tempFileRasterWrite);
+      cupsFileClose(tempFileRasterWrite);
+
+      bool shouldReverse = true;
+      char tempFileRasterNameReverse[1024];
+      if(shouldReverse) {
+        cups_file_t* tempFileRasterWriteReverse = cupsTempFile2(tempFileRasterNameReverse, sizeof(tempFileRasterNameReverse));
+        if(tempFileRasterWriteReverse == NULL) {
+          fprintf(stderr, "ERROR: " PACKAGE ": Temp file write reverse creation failed\n");
+          return 1;
+        }
+        fprintf(stderr, "DEBUG: " PACKAGE ": file name is %s reverse\n", tempFileRasterNameReverse);
+
+        tempFileRasterRead = cupsFileOpen(tempFileRasterName, "r");
+        if(tempFileRasterRead == NULL) {
+          fprintf(stderr, "ERROR: " PACKAGE ": Temp file read creation failed\n");
+          return 1;
+        }
+        fprintf(stderr, "DEBUG: " PACKAGE ": success in creating read side\n");
+
+        //Write the reverse file
+        const size_t bufferSize = sizeof(pixelDataBuffer);
+        size_t currPositionFromBack = 0;
+        while(totalFileSize > currPositionFromBack) {
+          long int newPosition = totalFileSize - currPositionFromBack;
+          unsigned int overrun = 0;
+          if(newPosition < 0) {
+            overrun = 0 - newPosition;
+            newPosition = 0;
+          }
+          cupsFileSeek(tempFileRasterRead, newPosition);
+
+          ssize_t readDataSize = cupsFileRead(tempFileRasterRead, (char*) pixelDataBuffer, bufferSize - overrun);
+          currPositionFromBack += readDataSize;
+
+          //Reverse buffer now
+          for(unsigned int i = 0; i < readDataSize / 2; i++) {
+            const char tmp = pixelDataBuffer[i];
+            pixelDataBuffer[i] = pixelDataBuffer[readDataSize - i - 1];
+            pixelDataBuffer[readDataSize - i - 1] = tmp;
+          }
+
+          //Write to new file
+          cupsFileWrite(tempFileRasterWriteReverse, (char*) pixelDataBuffer, readDataSize);
+        }
+
+        cupsFileFlush(tempFileRasterWriteReverse);
+        cupsFileClose(tempFileRasterWriteReverse);
+        cupsFileClose(tempFileRasterRead);
+      }
+
+      //Read file
+      tempFileRasterRead = cupsFileOpen(shouldReverse ? tempFileRasterNameReverse : tempFileRasterName, "r");
+      if(tempFileRasterRead == NULL) {
+        fprintf(stderr, "ERROR: " PACKAGE ": Temp file read creation failed\n");
+        return 1;
+      }
+      fprintf(stderr, "DEBUG: " PACKAGE ": success in creating read side\n");
+
       job.encode_page(build_page_params(header),
                       header.cupsHeight,
                       header.cupsBytesPerLine,
                       next_line);
+
+      //Close files so that new one can be made
+      cupsFileClose(tempFileRasterRead);
+
       fprintf(stderr, "PAGE: %d %d\n", job.pages(), header.NumCopies);
     }
 
