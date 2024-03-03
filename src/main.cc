@@ -44,6 +44,13 @@ void sigterm_handler(int sig) {
   interrupted = 1;
 }
 
+unsigned char reverseChar(unsigned char b) {
+   b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+   b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+   b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+   return b;
+}
+
 
 bool next_line(std::vector<uint8_t> &buf) {
   if (interrupted) {
@@ -51,7 +58,7 @@ bool next_line(std::vector<uint8_t> &buf) {
   }
 
   ssize_t bytesReadForLine = cupsFileRead(tempFileRasterRead, (char*) buf.data(), buf.size());
-  fprintf(stderr, "DEBUG: " PACKAGE ": read from file is %zd and %zu\n", bytesReadForLine, buf.size());
+  //fprintf(stderr, "DEBUG: " PACKAGE ": read from file is %zd and %zu\n", bytesReadForLine, buf.size());
 
   return bytesReadForLine == ((ssize_t) buf.size());
 }
@@ -212,13 +219,14 @@ int main(int argc, char *argv[]) {
       }
       fprintf(stderr, "DEBUG: " PACKAGE ": filepos is %ld\n", cupsFileTell(tempFileRasterWrite));
 
-      //Reset file position
+      //Flush file
       cupsFileFlush(tempFileRasterWrite);
       cupsFileClose(tempFileRasterWrite);
 
-      bool shouldReverse = true;
+      const bool shouldReverse = header.Duplex && header.Tumble;
       char tempFileRasterNameReverse[1024];
       if(shouldReverse) {
+        //Make reverse file to write to
         cups_file_t* tempFileRasterWriteReverse = cupsTempFile2(tempFileRasterNameReverse, sizeof(tempFileRasterNameReverse));
         if(tempFileRasterWriteReverse == NULL) {
           fprintf(stderr, "ERROR: " PACKAGE ": Temp file write reverse creation failed\n");
@@ -226,6 +234,7 @@ int main(int argc, char *argv[]) {
         }
         fprintf(stderr, "DEBUG: " PACKAGE ": file name is %s reverse\n", tempFileRasterNameReverse);
 
+        //Open file to read from original raster
         tempFileRasterRead = cupsFileOpen(tempFileRasterName, "r");
         if(tempFileRasterRead == NULL) {
           fprintf(stderr, "ERROR: " PACKAGE ": Temp file read creation failed\n");
@@ -237,26 +246,33 @@ int main(int argc, char *argv[]) {
         const size_t bufferSize = sizeof(pixelDataBuffer);
         size_t currPositionFromBack = 0;
         while(totalFileSize > currPositionFromBack) {
-          long int newPosition = totalFileSize - currPositionFromBack;
+          long int newPosition = totalFileSize - currPositionFromBack - bufferSize;
           unsigned int overrun = 0;
           if(newPosition < 0) {
             overrun = 0 - newPosition;
             newPosition = 0;
           }
-          cupsFileSeek(tempFileRasterRead, newPosition);
+          long int resSeek = cupsFileSeek(tempFileRasterRead, newPosition);
+          fprintf(stderr, "DEBUG: " PACKAGE ": resSeek - %ld\n", resSeek);
+          fprintf(stderr, "DEBUG: " PACKAGE ": bufferSize - %zu, newPosition - %ld, overrun - %u\n", bufferSize, newPosition, overrun);
+          size_t sizeToRead = bufferSize - overrun;
+          ssize_t readDataSize = cupsFileRead(tempFileRasterRead, (char*) pixelDataBuffer, sizeToRead);
+          fprintf(stderr, "DEBUG: " PACKAGE ": reeadDataSize - %zd, sizeToRead %zu\n", readDataSize, sizeToRead);
+          fprintf(stderr, "DEBUG: " PACKAGE ": filepos is %ld\n", cupsFileTell(tempFileRasterRead));
 
-          ssize_t readDataSize = cupsFileRead(tempFileRasterRead, (char*) pixelDataBuffer, bufferSize - overrun);
           currPositionFromBack += readDataSize;
 
           //Reverse buffer now
           for(unsigned int i = 0; i < readDataSize / 2; i++) {
-            const char tmp = pixelDataBuffer[i];
-            pixelDataBuffer[i] = pixelDataBuffer[readDataSize - i - 1];
-            pixelDataBuffer[readDataSize - i - 1] = tmp;
+            const unsigned char tmp = pixelDataBuffer[i];
+            pixelDataBuffer[i] = reverseChar(pixelDataBuffer[readDataSize - i - 1]);
+            pixelDataBuffer[readDataSize - i - 1] = reverseChar(tmp);
           }
 
           //Write to new file
+          //fprintf(stderr, "DEBUG: " PACKAGE ": readDataSize is %zd\n", readDataSize);
           cupsFileWrite(tempFileRasterWriteReverse, (char*) pixelDataBuffer, readDataSize);
+          //fprintf(stderr, "DEBUG: " PACKAGE ": filepos reverse is %ld\n", cupsFileTell(tempFileRasterWriteReverse));
         }
 
         cupsFileFlush(tempFileRasterWriteReverse);
